@@ -1,0 +1,33 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.9
+
+# Database
+# FIXED: Replaced psycopg2-binary with the modern, recommended driver 'psycopg' 
+# with the binary extra for easier installation. The original version was 
+# causing build errors on newer Python versions.
+supabase
+asyncpg
+psycopg[binary]
+
+# Authentication
+python-jose==3.3.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.0
+
+# AI/LLM (your existing + additions)
+openai
+google-generativeai
+anthropic==0.18.0
+
+# Utilities (your existing + additions)
+beautifulsoup4
+requests
+httpx==0.25.2
+# FIXED: Updated pydantic and pydantic-settings to resolve Python 3.13 
+# build issues and ensure compatibility with modern Python.
+pydantic==2.8.2
+pydantic-settings==2.3.4
+
+# Development
+ipykernel==6.29.5
