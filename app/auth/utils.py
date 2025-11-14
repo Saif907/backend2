@@ -7,7 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.libs.config import settings
 from app.libs.supabase_client import supabase_client
 # REMOVED: from app.auth.models import TokenData
-import requests
+import httpx # ADDED for asynchronous network calls
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -47,10 +47,13 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         
         print(f"📡 Calling Supabase API: {settings.SUPABASE_URL}/auth/v1/user")  # Debug log
         
-        response = requests.get(
-            f"{settings.SUPABASE_URL}/auth/v1/user",
-            headers=headers
-        )
+        # FIXED: Use httpx.AsyncClient inside an async context manager for efficiency.
+        # This makes the network call non-blocking.
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{settings.SUPABASE_URL}/auth/v1/user",
+                headers=headers
+            )
         
         print(f"✅ Supabase response status: {response.status_code}")  # Debug log
         
@@ -62,7 +65,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             print(f"👤 User ID: {user_id}")  # Debug log
             
             if user_id:
-                # Try to get profile
+                # Try to get profile (This Supabase library call is synchronous, 
+                # but it's typically much faster than the external network call above.)
                 try:
                     # Try to select existing profile
                     profile = supabase_client.service_client.table("profiles")\
@@ -100,9 +104,11 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         )
     
     except HTTPException:
+        # Pass FastAPI exceptions directly
         raise
     except Exception as e:
         print(f"💥 Auth error: {e}")
+        # General failure (e.g., network timeout to Supabase)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials"

@@ -6,35 +6,132 @@ from app.apis.models import (
 )
 from app.auth.utils import get_current_active_user
 from app.libs.supabase_client import supabase_client
+import asyncio # ADDED for concurrency
 
 router = APIRouter(prefix="/chats", tags=["Chats"])
 
+# --- Helper Functions (Synchronous Wrappers for Blocking DB Calls) ---
+
+def create_chat_sync(title: str, user_id: str):
+    """Blocking function to create a new chat."""
+    response = supabase_client.service_client.table("chats").insert({
+        "title": title,
+        "user_id": user_id
+    }).execute()
+    
+    if not response.data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create chat"
+        )
+    
+    return response.data[0]
+
+def get_chats_sync(user_id: str):
+    """Blocking function to get all chats for a user."""
+    response = supabase_client.service_client.table("chats")\
+        .select("*")\
+        .eq("user_id", user_id)\
+        .order("created_at", desc=True)\
+        .execute()
+    
+    return response.data
+
+def get_chat_sync(chat_id: str, user_id: str):
+    """Blocking function to get a specific chat and its messages."""
+    # Get chat (Verify ownership)
+    chat_response = supabase_client.service_client.table("chats")\
+        .select("*")\
+        .eq("id", chat_id)\
+        .eq("user_id", user_id)\
+        .single()\
+        .execute()
+    
+    if not chat_response.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat not found"
+        )
+    
+    # Get messages
+    messages_response = supabase_client.service_client.table("messages")\
+        .select("*")\
+        .eq("chat_id", chat_id)\
+        .order("created_at", desc=False)\
+        .execute()
+    
+    return {
+        "chat": chat_response.data,
+        "messages": messages_response.data
+    }
+
+def delete_chat_sync(chat_id: str, user_id: str):
+    """Blocking function to delete a chat and verify ownership."""
+    # Verify ownership (will raise 404 if not found or not owned)
+    chat_response = supabase_client.service_client.table("chats")\
+        .select("*")\
+        .eq("id", chat_id)\
+        .eq("user_id", user_id)\
+        .single()\
+        .execute()
+    
+    if not chat_response.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat not found"
+        )
+    
+    # Perform delete
+    supabase_client.service_client.table("chats")\
+        .delete()\
+        .eq("id", chat_id)\
+        .execute()
+
+def create_message_sync(message_data: MessageCreate, user_id: str):
+    """Blocking function to create a new message and verify chat ownership."""
+    # Verify chat ownership
+    chat_response = supabase_client.service_client.table("chats")\
+        .select("*")\
+        .eq("id", message_data.chat_id)\
+        .eq("user_id", user_id)\
+        .single()\
+        .execute()
+    
+    if not chat_response.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat not found"
+        )
+    
+    # Insert message
+    response = supabase_client.service_client.table("messages").insert({
+        "chat_id": message_data.chat_id,
+        "user_id": user_id,
+        "content": message_data.content,
+        "role": message_data.role
+    }).execute()
+    
+    if not response.data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create message"
+        )
+    
+    return response.data[0]
+
+# --- Router Endpoints (Non-Blocking) ---
 
 @router.post("", response_model=ChatResponse, status_code=status.HTTP_201_CREATED)
 async def create_chat(
     chat_data: ChatCreate,
     current_user: dict = Depends(get_current_active_user)
 ):
-    """Create a new chat session"""
+    """Create a new chat session (Now non-blocking)"""
     try:
         print(f"📝 Creating chat for user: {current_user.get('id')}")
         print(f"📝 Chat title: {chat_data.title}")
         
-        # FIXED: Use service_client and remove invalid .select() / returning=
-        response = supabase_client.service_client.table("chats").insert({
-            "title": chat_data.title,
-            "user_id": current_user["id"]
-        }).execute()
-        
-        print(f"✅ Chat creation response: {response.data}")
-        
-        if not response.data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create chat"
-            )
-        
-        return response.data[0]
+        return await asyncio.to_thread(create_chat_sync, chat_data.title, current_user["id"])
     
     except Exception as e:
         print(f"❌ Error creating chat: {e}")
@@ -46,16 +143,9 @@ async def create_chat(
 
 @router.get("", response_model=List[ChatResponse])
 async def get_chats(current_user: dict = Depends(get_current_active_user)):
-    """Get all chats for current user"""
+    """Get all chats for current user (Now non-blocking)"""
     try:
-        # FIXED: Use service_client to bypass RLS
-        response = supabase_client.service_client.table("chats")\
-            .select("*")\
-            .eq("user_id", current_user["id"])\
-            .order("created_at", desc=True)\
-            .execute()
-        
-        return response.data
+        return await asyncio.to_thread(get_chats_sync, current_user["id"])
     
     except Exception as e:
         print(f"❌ Error getting chats: {e}")
@@ -70,35 +160,9 @@ async def get_chat(
     chat_id: str,
     current_user: dict = Depends(get_current_active_user)
 ):
-    """Get a specific chat with all messages"""
+    """Get a specific chat with all messages (Now non-blocking)"""
     try:
-        # Get chat
-        # FIXED: Use service_client to bypass RLS
-        chat_response = supabase_client.service_client.table("chats")\
-            .select("*")\
-            .eq("id", chat_id)\
-            .eq("user_id", current_user["id"])\
-            .single()\
-            .execute()
-        
-        if not chat_response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chat not found"
-            )
-        
-        # Get messages
-        # FIXED: Use service_client to bypass RLS
-        messages_response = supabase_client.service_client.table("messages")\
-            .select("*")\
-            .eq("chat_id", chat_id)\
-            .order("created_at", desc=False)\
-            .execute()
-        
-        return {
-            "chat": chat_response.data,
-            "messages": messages_response.data
-        }
+        return await asyncio.to_thread(get_chat_sync, chat_id, current_user["id"])
     
     except HTTPException:
         raise
@@ -115,29 +179,9 @@ async def delete_chat(
     chat_id: str,
     current_user: dict = Depends(get_current_active_user)
 ):
-    """Delete a chat and all its messages"""
+    """Delete a chat and all its messages (Now non-blocking)"""
     try:
-        # Verify ownership
-        # FIXED: Use service_client to bypass RLS
-        chat_response = supabase_client.service_client.table("chats")\
-            .select("*")\
-            .eq("id", chat_id)\
-            .eq("user_id", current_user["id"])\
-            .single()\
-            .execute()
-        
-        if not chat_response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chat not found"
-            )
-        
-        # Use service_client for DELETE operation
-        supabase_client.service_client.table("chats")\
-            .delete()\
-            .eq("id", chat_id)\
-            .execute()
-        
+        await asyncio.to_thread(delete_chat_sync, chat_id, current_user["id"])
         return None
     
     except HTTPException:
@@ -155,39 +199,9 @@ async def create_message(
     message_data: MessageCreate,
     current_user: dict = Depends(get_current_active_user)
 ):
-    """Create a new message in a chat"""
+    """Create a new message in a chat (Now non-blocking)"""
     try:
-        # Verify chat ownership
-        # FIXED: Use service_client to bypass RLS
-        chat_response = supabase_client.service_client.table("chats")\
-            .select("*")\
-            .eq("id", message_data.chat_id)\
-            .eq("user_id", current_user["id"])\
-            .single()\
-            .execute()
-        
-        if not chat_response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chat not found"
-            )
-        
-        # Use service_client for INSERT operation
-        # FIXED: Removed the invalid .select('*') / returning=
-        response = supabase_client.service_client.table("messages").insert({
-            "chat_id": message_data.chat_id,
-            "user_id": current_user["id"],
-            "content": message_data.content,
-            "role": message_data.role
-        }).execute()
-        
-        if not response.data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create message"
-            )
-        
-        return response.data[0]
+        return await asyncio.to_thread(create_message_sync, message_data, current_user["id"])
     
     except HTTPException:
         raise

@@ -12,6 +12,61 @@ import json
 
 router = APIRouter(prefix="/ai", tags=["AI"])
 
+# --- Helper Functions (Synchronous Wrappers for Blocking DB Calls) ---
+# We use these so they can be safely run concurrently via asyncio.to_thread
+
+def get_chat_and_trades_sync(chat_id, user_id):
+    """Performs the blocking DB reads for chat context."""
+    # Get Chat History (Sync DB Read)
+    messages_response = supabase_client.service_client.table("messages")\
+        .select("*")\
+        .eq("chat_id", chat_id)\
+        .order("created_at", desc=False)\
+        .execute()
+
+    # FETCH TRADE HISTORY (Sync DB Read)
+    trade_history_response = supabase_client.service_client.table("trades")\
+        .select("ticker, entry_price, exit_price, quantity, entry_date, profit_loss, notes")\
+        .eq("user_id", user_id)\
+        .order("entry_date", desc=True)\
+        .limit(20) \
+        .execute()
+    
+    return messages_response.data, trade_history_response.data
+
+def insert_user_message_sync(chat_id, user_id, content):
+    """Performs the blocking DB write for user message."""
+    return supabase_client.service_client.table("messages").insert({
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "content": content,
+        "role": "user"
+    }).execute()
+
+def insert_ai_message_sync(chat_id, user_id, content):
+    """Performs the blocking DB write for AI message."""
+    return supabase_client.service_client.table("messages").insert({
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "content": content,
+        "role": "assistant"
+    }).execute()
+    
+def insert_trade_sync(user_id, extracted_trade, profit_loss):
+    """Performs the blocking DB write for a new trade."""
+    return supabase_client.service_client.table("trades").insert({
+        "user_id": user_id,
+        "ticker": extracted_trade.ticker.upper(),
+        "entry_date": extracted_trade.entry_date.isoformat(),
+        "entry_price": extracted_trade.entry_price,
+        "quantity": extracted_trade.quantity, 
+        "exit_date": extracted_trade.exit_date.isoformat() if extracted_trade.exit_date else None,
+        "exit_price": extracted_trade.exit_price,
+        "notes": extracted_trade.notes,
+        "profit_loss": profit_loss
+    }).execute()
+
+# --- Router Function (Optimized for Concurrency) ---
 
 @router.post("/chat", response_model=AIMessageResponse)
 async def ai_chat(
@@ -19,12 +74,15 @@ async def ai_chat(
     current_user: dict = Depends(get_current_active_user)
 ):
     """Send message to AI and get response with optional trade extraction"""
+    user_id = current_user["id"]
+    chat_id = request.chat_id
+    
     try:
-        # 1. Verify chat ownership (DB Read)
+        # 1. Verify chat ownership (Blocking DB Read - Kept sequential to fail fast)
         chat_response = supabase_client.service_client.table("chats")\
             .select("*")\
-            .eq("id", request.chat_id)\
-            .eq("user_id", current_user["id"])\
+            .eq("id", chat_id)\
+            .eq("user_id", user_id)\
             .single()\
             .execute()
         
@@ -34,88 +92,79 @@ async def ai_chat(
                 detail="Chat not found or user does not have permission"
             )
         
-        # 2. Save User Message (DB Write)
-        user_msg = supabase_client.service_client.table("messages").insert({
-            "chat_id": request.chat_id,
-            "user_id": current_user["id"],
-            "content": request.message,
-            "role": "user"
-        }).execute()
-        
-        # 3. Get Chat History (DB Read)
-        messages = supabase_client.service_client.table("messages")\
-            .select("*")\
-            .eq("chat_id", request.chat_id)\
-            .order("created_at", desc=False)\
-            .execute()
+        # 2. Concurrently execute initial I/O tasks (Speed/Smoothness)
+        # We use asyncio.to_thread for synchronous DB calls to prevent blocking the event loop.
+        user_msg_task = asyncio.to_thread(insert_user_message_sync, chat_id, user_id, request.message)
+        db_read_task = asyncio.to_thread(get_chat_and_trades_sync, chat_id, user_id)
+        extraction_task = ai_service.extract_trade_from_text(request.message) # Non-blocking AI call
 
-        # 4. FETCH TRADE HISTORY
-        trade_history_response = supabase_client.service_client.table("trades")\
-            .select("ticker, entry_price, exit_price, quantity, entry_date, profit_loss, notes")\
-            .eq("user_id", current_user["id"])\
-            .order("entry_date", desc=True)\
-            .limit(20) \
-            .execute()
-        
-        trade_history = trade_history_response.data or []
+        try:
+            (user_msg_response, (messages_data, trade_history), extracted_trade) = await asyncio.gather(
+                user_msg_task, 
+                db_read_task,
+                extraction_task
+            )
+        except Exception as e:
+            print(f"❌ Error during initial concurrent tasks: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="A critical initial task failed (DB or AI Extraction). " + str(e)
+            )
 
-        # 5. CONCURRENT AI CALLS (For Performance)
-        chat_history_for_ai = [{"role": m["role"], "content": m["content"]} for m in messages.data]
+        # 3. Generate AI Response (Non-Blocking LLM Call)
+        chat_history_for_ai = [{"role": m["role"], "content": m["content"]} for m in messages_data]
+        ai_response_text = "I apologize, but I'm having trouble processing your request right now. Please try again."
         
-        extraction_task = ai_service.extract_trade_from_text(request.message)
+        try:
+            ai_response_text = await ai_service.generate_chat_response(
+                user_message=request.message,
+                chat_history=chat_history_for_ai,
+                trade_history=trade_history
+            )
+        except Exception as e:
+            # Protection: If the main AI chat generation fails, we still proceed with a fallback message
+            print(f"❌ Error during main AI generation: {e}")
+            # The fallback message is already set above
         
-        generation_task = ai_service.generate_chat_response(
-            user_message=request.message,
-            chat_history=chat_history_for_ai,
-            trade_history=trade_history
-        )
+        # 4. Concurrently save final data (Protection/Stability)
         
-        extracted_trade, ai_response_text = await asyncio.gather(
-            extraction_task, 
-            generation_task
-        )
-
-        # 6. Save Extracted Trade (DB Write)
+        trade_insert_task = None
+        profit_loss_value = None
         if extracted_trade:
-            # Calculate profit/loss
-            profit_loss = None
+            # Calculate profit/loss before saving (Same logic as original code)
+            profit_loss_value = None
             if extracted_trade.exit_price:
-                # Ensure quantity is treated as float for calculation
                 quantity = float(extracted_trade.quantity)
-                profit_loss = (extracted_trade.exit_price - extracted_trade.entry_price) * quantity
+                profit_loss_value = (extracted_trade.exit_price - extracted_trade.entry_price) * quantity
 
-            trade_response = supabase_client.service_client.table("trades").insert({
-                "user_id": current_user["id"],
-                "ticker": extracted_trade.ticker.upper(),
-                "entry_date": extracted_trade.entry_date.isoformat(),
-                "entry_price": extracted_trade.entry_price,
-                "quantity": extracted_trade.quantity, # Keep as float/numeric
-                "exit_date": extracted_trade.exit_date.isoformat() if extracted_trade.exit_date else None,
-                "exit_price": extracted_trade.exit_price,
-                "notes": extracted_trade.notes,
-                "profit_loss": profit_loss
-            }).execute()
+            # Task D: Save Extracted Trade (Blocking DB Write, now in a thread)
+            trade_insert_task = asyncio.to_thread(insert_trade_sync, user_id, extracted_trade, profit_loss_value)
         
-        # 7. Save AI Response (DB Write)
-        ai_msg = supabase_client.service_client.table("messages").insert({
-            "chat_id": request.chat_id,
-            "user_id": current_user["id"],
-            "content": ai_response_text,
-            "role": "assistant"
-        }).execute()
+        # Task E: Save AI Response (Blocking DB Write, now in a thread)
+        ai_msg_task = asyncio.to_thread(insert_ai_message_sync, chat_id, user_id, ai_response_text)
         
+        final_tasks = [ai_msg_task]
+        if trade_insert_task:
+            final_tasks.append(trade_insert_task)
+            
+        # Wait for all final writes before returning to the user
+        await asyncio.gather(*final_tasks)
+        
+        # 5. Final response
         return {
             "message": ai_response_text,
             "trade_extracted": extracted_trade
         }
     
     except HTTPException:
+        # Pass FastAPI exceptions directly
         raise
     except Exception as e:
-        print(f"❌ Error in /ai/chat: {e}")
+        # Catches unexpected critical failures (e.g., connection lost)
+        print(f"❌ Critical error in /ai/chat: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=f"An unexpected critical error occurred: {str(e)}"
         )
 
 
