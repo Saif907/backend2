@@ -20,7 +20,7 @@ async def create_chat(
         print(f"📝 Creating chat for user: {current_user.get('id')}")
         print(f"📝 Chat title: {chat_data.title}")
         
-        # FIXED: Use service_client to bypass RLS
+        # FIXED: Use service_client and remove invalid .select() / returning=
         response = supabase_client.service_client.table("chats").insert({
             "title": chat_data.title,
             "user_id": current_user["id"]
@@ -173,6 +173,7 @@ async def create_message(
             )
         
         # Use service_client for INSERT operation
+        # FIXED: Removed the invalid .select('*') / returning=
         response = supabase_client.service_client.table("messages").insert({
             "chat_id": message_data.chat_id,
             "user_id": current_user["id"],

@@ -1,7 +1,7 @@
 import json
 from typing import Optional, Dict, Any
 from datetime import datetime
-import google.generativeai as genai  # Replaced Anthropic
+import google.generativeai as genai
 from app.libs.config import settings
 from app.apis.models import TradeCreate
 
@@ -13,8 +13,6 @@ class AIService:
         # Configure the Gemini client
         genai.configure(api_key=settings.GEMINI_API_KEY)
         
-        # We need separate model instances for different system prompts and tasks
-
         # 1. Model for Trade Extraction (Forced JSON output)
         today = datetime.now().strftime('%Y-%m-%d')
         extraction_system_prompt = f"""You are a trading journal assistant. Extract trade information from user messages.
@@ -46,14 +44,13 @@ Rules:
             generation_config=extraction_config
         )
 
-        # 2. Model for General Chat
-        chat_system_prompt = """You are an AI trading journal assistant. Help users:
-- Log and track their trades
-- Analyze trading patterns
-- Provide insights on performance
-- Answer questions about their trading history
-
-Be concise, helpful, and encouraging. If a trade was extracted, acknowledge it and provide relevant insights."""
+        # 2. Model for General Chat - UPDATED PROMPT FOR ANALYTICS
+        chat_system_prompt = """You are an AI trading journal assistant. Your primary goal is to help the user improve their trading.
+- Use the provided trade history context to analyze user queries (e.g., "Review my recent trades" or "What should I do next?").
+- Provide specific, actionable insights (e.g., "Your win rate on tech stocks is 70%," or "Consider reducing your average position size.").
+- Be concise, helpful, and encouraging.
+- If a user logs a trade, acknowledge it and offer analysis based on their history.
+- If no trade was extracted, acknowledge the user's input, but do not assume a trade was logged."""
         
         self.chat_model = genai.GenerativeModel(
             model_name='models/gemini-2.5-flash',
@@ -67,7 +64,6 @@ Be concise, helpful, and encouraging. If a trade was extracted, acknowledge it a
         self.analysis_model = genai.GenerativeModel(
             model_name='models/gemini-2.5-flash',
             generation_config=analysis_config
-            # No system prompt, as the full instruction is in the user message
         )
 
     async def extract_trade_from_text(self, text: str) -> Optional[TradeCreate]:
@@ -100,37 +96,45 @@ Be concise, helpful, and encouraging. If a trade was extracted, acknowledge it a
         self, 
         user_message: str, 
         chat_history: list,
-        extracted_trade: Optional[TradeCreate] = None
+        trade_history: list # NEW: Accept trade history
     ) -> str:
         """Generate AI response for chat conversation"""
         
-        # Build conversation history for Gemini
+        # Build conversation history for Gemini (Existing logic)
         gemini_history = []
-        for msg in chat_history[-10:]:  # Last 10 messages for context
+        for msg in chat_history[-10:]:
             role = "model" if msg.get("role") == "assistant" else "user"
             gemini_history.append({
                 "role": role,
                 "parts": [msg.get("content", "")]
             })
         
-        # Prepare the new user message
-        current_user_content = user_message
-        
-        # Add trade extraction context if available
-        if extracted_trade:
-            trade_summary = f"\n\n[Trade extracted: {extracted_trade.ticker} - Entry: ${extracted_trade.entry_price}, Qty: {extracted_trade.quantity}"
-            if extracted_trade.exit_price:
-                profit_loss = (extracted_trade.exit_price - extracted_trade.entry_price) * extracted_trade.quantity
-                trade_summary += f", Exit: ${extracted_trade.exit_price}, P/L: ${profit_loss:.2f}"
-            trade_summary += "]"
-            current_user_content += trade_summary
+        # 1. Prepare Trade Context
+        if trade_history:
+            trade_context = "\n\n--- TRADE HISTORY FOR ANALYSIS (Last 20 Trades) ---\n"
+            # Format history as JSON for the LLM
+            # Use default=str to handle non-serializable types like datetime
+            trade_context += json.dumps(trade_history, indent=2, default=str)
+            trade_context += "\n-----------------------------------------------------\n"
+        else:
+            trade_context = "\n\n(No trade history found for analysis.)\n"
             
+        
+        # 2. Combine Context with User Request
+        full_context_message = f"""
+[CONTEXT]: Use the trade data below to answer the user's request. Focus on providing personalized analysis, review, or planning suggestions based on this history.
+
+{trade_context}
+
+[USER REQUEST]: {user_message}
+"""
+        
         try:
             # Start a chat session with the existing history
             chat_session = self.chat_model.start_chat(history=gemini_history)
             
-            # Send the new user message (with trade context)
-            response = await chat_session.send_message_async(current_user_content)
+            # Send the new user message (with full trade context)
+            response = await chat_session.send_message_async(full_context_message)
             
             return response.text
         
@@ -161,7 +165,7 @@ Be concise, helpful, and encouraging. If a trade was extracted, acknowledge it a
         
         prompt = f"""Analyze these recent trades and provide insights:
 
-{json.dumps(trade_summary, indent=2)}
+{json.dumps(trade_summary, indent=2, default=str)}
 
 Provide:
 1. Overall performance summary
