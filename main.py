@@ -5,6 +5,7 @@ from app.auth.router import router as auth_router
 from app.apis.chat_router import router as chat_router
 from app.apis.trade_router import router as trade_router
 from app.apis.ai_router import router as ai_router
+from app.apis.internal_router import router as internal_router # NEW IMPORT
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -36,6 +37,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(trade_router, prefix="/api")
 app.include_router(ai_router, prefix="/api")
+app.include_router(internal_router, prefix="/api") # NEW ROUTER INCLUDED
 
 
 @app.get("/")

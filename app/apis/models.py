@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional, List
+from typing import Optional, List, Literal # IMPORTED: Literal for strict role enforcement
 from datetime import datetime, date
 
 
@@ -72,7 +72,7 @@ class MessageCreate(BaseModel):
     """Create new message"""
     chat_id: str
     content: str
-    role: str  # 'user' or 'assistant'
+    role: Literal['user', 'assistant'] # FIXED: Enforce role type strictly
 
 
 class MessageResponse(BaseModel):
@@ -143,6 +143,7 @@ class AIMessageResponse(BaseModel):
     """AI response"""
     message: str
     trade_extracted: Optional[TradeCreate] = None
+    is_grounded: bool = False # ADDED: Flag to indicate if web search was used
 
 
 class TradeExtractionRequest(BaseModel):
@@ -176,3 +177,21 @@ class Insight(BaseModel):
 class InsightsResponse(BaseModel):
     """List of AI insights"""
     insights: List[Insight]
+
+# ============ Internal Console Models ============
+class UserDataInternal(BaseModel):
+    """Data model matching the requirements of the internal Users.tsx page."""
+    id: str
+    pseudonymous_id: str
+    consent_given: bool
+    created_at: datetime
+    updated_at: datetime
+    trades_count: int
+    chats_count: int
+
+class OverviewMetrics(BaseModel):
+    """Core platform metrics for the internal console overview."""
+    totalUsers: int
+    activeUsersWeek: int
+    totalTrades: int
+    totalChats: int
