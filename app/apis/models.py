@@ -138,7 +138,6 @@ class AIMessageRequest(BaseModel):
     chat_id: str
     message: str
 
-
 class AIMessageResponse(BaseModel):
     """AI response"""
     message: str

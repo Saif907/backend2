@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
-    # AI APIs
-    ANTHROPIC_API_KEY: str
-    OPENAI_API_KEY: str
-    GEMINI_API_KEY: str
+    # AI Service (Updated to Microservice URL)
+    AI_SERVICE_URL: str = "http://localhost:8001"
+    
+    # REMOVED: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
     
     # Server
     HOST: str = "0.0.0.0"
